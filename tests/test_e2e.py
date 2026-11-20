@@ -73,3 +73,73 @@ def test_e2e_health_db_up():
     resp = client.get("/health")
     assert resp.status_code == 200
     assert resp.json()["database"] == "up"
+
+
+# ---------- 误报暂扣：隔离 PostgreSQL 真机复算 ----------
+
+def test_e2e_withhold_solved_and_rechecked():
+    resp = client.post(
+        "/withhold",
+        json={
+            "query": (
+                "SELECT s.id, r.value FROM stations s "
+                "LEFT JOIN readings r ON s.id = r.station_id "
+                "WHERE r.value IS NULL OR r.value >= 10"
+            ),
+            "stations": [[1, 5], [2, None]],
+            "readings": [[1, 99], [1, 10], [2, 7], [None, 3]],
+            "false_positive_rows": [[1, 99]],
+            "withholdable_reading_rows": [1, 2, 3],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "SOLVED"
+    assert body["withhold_rows"] == [1]
+    before = body["recheck"]["before_result"]
+    after = body["recheck"]["after_result"]
+    assert [1, 99] in before and [1, 99] not in after
+    # 非误报结果与重数保持
+    assert after.count([1, 10]) == before.count([1, 10]) == 1
+
+
+def test_e2e_withhold_no_solution():
+    resp = client.post(
+        "/withhold",
+        json={
+            "query": (
+                "SELECT s.id, r.value FROM stations s "
+                "LEFT JOIN readings r ON s.id = r.station_id "
+                "WHERE r.value IS NULL"
+            ),
+            "stations": [[1, 5], [2, 9]],
+            "readings": [[2, 8]],
+            "false_positive_rows": [[1, None]],
+            "withholdable_reading_rows": [1],
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["verdict"] == "NO_SOLUTION"
+
+
+def test_e2e_withhold_duplicate_fp_copies():
+    """同一误报元组多个副本：产生副本的读数全部进入最小暂扣集。"""
+    resp = client.post(
+        "/withhold",
+        json={
+            "query": (
+                "SELECT s.id, r.value FROM stations s "
+                "LEFT JOIN readings r ON s.id = r.station_id"
+            ),
+            "stations": [[1, 5]],
+            "readings": [[1, 99], [1, 99], [1, 10]],
+            "false_positive_rows": [[1, 99]],
+            "withholdable_reading_rows": [1, 2, 3],
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["verdict"] == "SOLVED"
+    assert body["withhold_rows"] == [1, 2]
+    after = body["recheck"]["after_result"]
+    assert [1, 99] not in after and after == [[1, 10]]
